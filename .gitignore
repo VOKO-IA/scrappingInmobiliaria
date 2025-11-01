@@ -1,0 +1,33 @@
+# Dependencias de pnpm/Node
+/node_modules
+
+# Archivos de la build de TypeScript (asumiendo que los genera)
+/dist
+/build
+/out
+
+# Archivos de configuración y estado
+.env
+.DS_Store # macOS
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# pnpm
+pnpm-debug.log*
+pnpm-lock.yaml
+
+# Compilados de TypeScript y archivos de mapeo
+*.js
+!/index.ts # <-- *Importante: si index.ts está en la raíz y es tu fuente,
+           # asegúrate de que no sea ignorado por un patrón más general.
+           # Si tu fuente está en 'src', no te preocupes por esta línea.
+
+*.d.ts
+*.map
+
+# Cobertura de tests
+/coverage
+
+# Entornos de desarrollo/IDE
+.vscode
+.idea
