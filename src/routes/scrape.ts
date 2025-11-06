@@ -122,39 +122,26 @@ scrape.get('/document/:id', async (req, res) => {
     }
     // Layout dos columnas (diseño anterior)
     const colLeftX = leftX;
-    const colLeftW = 300;
+    const colLeftW = 340;
     const colRightX = leftX + colLeftW + 18; // gap 18
     const colRightW = rightX - colRightX;
 
     const heroUrl = images[0];
-    const thumbUrls = images.slice(1, 5);
 
     // Hero
     const heroY = 96;
     if (heroUrl) {
       const buf = await fetchImage(heroUrl);
       if (buf) {
-        try { doc.image(buf, colLeftX, heroY, { fit: [colLeftW, 260], align: 'center', valign: 'center' }); } catch {}
+        try { doc.image(buf, colLeftX, heroY, { fit: [colLeftW, 320], align: 'center', valign: 'center' }); } catch {}
       } else {
-        doc.rect(colLeftX, heroY, colLeftW, 260).strokeColor('#d1d5db').stroke();
+        doc.rect(colLeftX, heroY, colLeftW, 320).strokeColor('#d1d5db').stroke();
       }
     } else {
-      doc.rect(colLeftX, heroY, colLeftW, 260).strokeColor('#d1d5db').stroke();
+      doc.rect(colLeftX, heroY, colLeftW, 320).strokeColor('#d1d5db').stroke();
     }
 
-    // Thumbnails fila 4
-    const thumbY = heroY + 270;
-    const thumbSize = 64;
-    const thumbGap = 12;
-    for (let i = 0; i < thumbUrls.length; i++) {
-      const x = colLeftX + i * (thumbSize + thumbGap);
-      const b = await fetchImage(thumbUrls[i]);
-      if (b) {
-        try { doc.image(b, x, thumbY, { fit: [thumbSize, thumbSize] }); } catch {}
-      } else {
-        doc.rect(x, thumbY, thumbSize, thumbSize).strokeColor('#d1d5db').stroke();
-      }
-    }
+    // (Thumbnails removidos para privilegiar imágenes grandes)
 
     // Columna derecha detalles
     let y = heroY;
@@ -200,6 +187,42 @@ scrape.get('/document/:id', async (req, res) => {
       doc.fontSize(10).fillColor('#2563eb').text(String(entry.url), colRightX, y, { width: colRightW, link: String(entry.url), underline: true });
       doc.fillColor('#000000');
     } */
+
+    // Galería adicional en nueva página (todas las imágenes después del hero)
+    const remaining = images.slice(1);
+    if (remaining.length > 0) {
+      doc.addPage();
+      const pageLeftX = leftX;
+      const pageRightX = rightX;
+      const gridGap = 16;
+      const gridCols = 2;
+      const gridColW = Math.floor((pageRightX - pageLeftX - gridGap) / gridCols);
+      const gridRowH = 260;
+      let gx = pageLeftX;
+      let gy = 40;
+      for (let i = 0; i < remaining.length; i++) {
+        const imgBuf = await fetchImage(remaining[i]);
+        if (imgBuf) {
+          try { doc.image(imgBuf, gx, gy, { fit: [gridColW, gridRowH], align: 'center', valign: 'center' }); } catch {
+            doc.rect(gx, gy, gridColW, gridRowH).strokeColor('#d1d5db').stroke();
+          }
+        } else {
+          doc.rect(gx, gy, gridColW, gridRowH).strokeColor('#d1d5db').stroke();
+        }
+        if ((i % gridCols) === gridCols - 1) {
+          gx = pageLeftX;
+          gy += gridRowH + gridGap;
+          const pageHeightLimit = 800;
+          if (gy + gridRowH > pageHeightLimit) {
+            doc.addPage();
+            gx = pageLeftX;
+            gy = 40;
+          }
+        } else {
+          gx += gridColW + gridGap;
+        }
+      }
+    }
 
     doc.end();
   } catch (error) {
