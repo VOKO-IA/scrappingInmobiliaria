@@ -11,6 +11,9 @@ export class WebScraperService {
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
   ];
 
+  private static readonly MOBILE_UA =
+    'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
   private static readonly MIN_DIMENSION_PX = 150;
 
   /**
@@ -50,23 +53,59 @@ export class WebScraperService {
    * Realiza la petición HTTP a la URL
    */
   private async fetchPage(url: string) {
-    const userAgent = WebScraperService.USER_AGENTS[
+    const urlObj = new URL(url);
+    const isInmuebles24 = urlObj.hostname.includes('inmuebles24.com');
+
+    const desktopUA = WebScraperService.USER_AGENTS[
       Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)
     ];
 
-    return axios.get<string>(url, {
-      timeout: env.scrapeTimeoutMs,
-      maxRedirects: 5,
-      maxContentLength: env.scrapeMaxBytes,
-      maxBodyLength: env.scrapeMaxBytes,
-      headers: {
-        'User-Agent': userAgent,
-        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      responseType: 'text',
-      validateStatus: (status) => status >= 200 && status < 400,
-    });
+    const baseHeaders: Record<string, string> = {
+      'User-Agent': desktopUA,
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    };
+
+    if (isInmuebles24) {
+      baseHeaders['Referer'] = 'https://www.google.com/';
+      baseHeaders['Upgrade-Insecure-Requests'] = '1';
+      baseHeaders['Sec-Fetch-Dest'] = 'document';
+      baseHeaders['Sec-Fetch-Mode'] = 'navigate';
+      baseHeaders['Sec-Fetch-Site'] = 'cross-site';
+    }
+
+    const attempt = async (headers: Record<string, string>) => {
+      const resp = await axios.get<string>(url, {
+        timeout: env.scrapeTimeoutMs,
+        maxRedirects: 5,
+        maxContentLength: env.scrapeMaxBytes,
+        maxBodyLength: env.scrapeMaxBytes,
+        headers,
+        responseType: 'text',
+        // Permitimos todos los códigos para manejar lógica propia de reintentos
+        validateStatus: () => true,
+      });
+      return resp;
+    };
+
+    // 1) Intento con UA de escritorio
+    let response = await attempt(baseHeaders);
+
+    // 2) Si falla y es inmuebles24, reintentar con UA móvil y mismos headers
+    if (isInmuebles24 && (response.status < 200 || response.status >= 400)) {
+      const mobileHeaders = { ...baseHeaders, 'User-Agent': WebScraperService.MOBILE_UA };
+      response = await attempt(mobileHeaders);
+    }
+
+    if (response.status >= 200 && response.status < 400) {
+      return response;
+    }
+
+    const statusText = response.statusText || 'Request failed';
+    const bodyLen = typeof response.data === 'string' ? response.data.length : 0;
+    throw new Error(
+      `HTTP_ERROR: STATUS_${response.status} - ${statusText} [host=${urlObj.hostname} path=${urlObj.pathname} len=${bodyLen}]`
+    );
   }
 
   /**
