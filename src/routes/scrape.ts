@@ -1,154 +1,212 @@
 import { Router } from 'express';
-import multer from 'multer';
+import { ExtractionService } from '../services/extraction';
+import { HistoryService } from '../services/history';
+import PDFDocument from 'pdfkit';
+import fs from 'fs/promises';
+import path from 'path';
+import { env } from '../config/env';
 import axios from 'axios';
-import { scrapeFromQuery, extractFromQuery, extractFromPdfUrl, extractFromPdfBuffer, analyzePdfWithGemini, generateInmoReportPdf, generateMultiPropertyReportPdf, InmoExtract } from '../services/scraper';
+
+const extractionService = new ExtractionService();
 
 export const scrape = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-scrape.get('/scrape', async (req, res) => {
-  try {
-    const { status, body } = await scrapeFromQuery(req.query);
-    return res.status(status).json(body);
-  } catch (err: any) {
-    if (axios.isAxiosError(err)) {
-      const status = err.response?.status || 500;
-      const code = err.code || 'AXIOS_ERROR';
-      return res.status(status >= 400 && status < 600 ? status : 500).json({ ok: false, error: code, message: err.message });
-    }
-    return res.status(500).json({ ok: false, error: 'UNKNOWN', message: String(err?.message || err) });
-  }
-});
-
-// Upload a local PDF file and extract content
-scrape.post('/pdf/extract/upload', upload.single('file'), async (req, res) => {
-  try {
-    const file = (req as any).file as any;
-    if (!file || !file.buffer) {
-      return res.status(400).json({ ok: false, error: 'NO_FILE', message: 'Attach a PDF file in form-data field "file"' });
-    }
-    const mode = (req.body?.mode || (req.query as any)?.mode || '').toString();
-    const analyze = String((req.body?.analyze ?? (req.query as any)?.analyze ?? 'false')).toLowerCase() === 'true';
-    const output = ((req.body?.output || (req.query as any)?.output || 'json') as string).toLowerCase();
-    const prompt = (req.body?.prompt || (req.query as any)?.prompt || '').toString();
-
-    const { status, body } = await extractFromPdfBuffer({ buffer: file.buffer, mode });
-    if (status !== 200 || !body?.extracted) {
-      return res.status(status).json(body);
-    }
-
-    // Si no se requiere análisis, retornar extracción cruda
-    if (!analyze) {
-      return res.status(200).json(body);
-    }
-
-    // Analizar con Gemini
-    try {
-      const text = (body.extracted as any)?.text || '';
-      const images = (body.extracted as any)?.images || [];
-      const url = (body as any)?.url || (body.extracted as any)?.pdf || undefined;
-      const { model, extracted } = await analyzePdfWithGemini({ text, images, url, prompt });
-
-      if (output === 'pdf') {
-        const { url: reportUrl } = await generateInmoReportPdf({ extracted });
-        return res.status(200).json({ ok: true, model, extracted, reportPdf: reportUrl });
-      }
-
-      return res.status(200).json({ ok: true, model, extracted });
-    } catch (e: any) {
-      const message = String(e?.message || e);
-      const code = message === 'MISSING_GEMINI_API_KEY' ? 'MISSING_GEMINI_API_KEY' : 'GEMINI_ERROR';
-      const http = code === 'MISSING_GEMINI_API_KEY' ? 500 : 500;
-      return res.status(http).json({ ok: false, error: code, message });
-    }
-  } catch (err: any) {
-    if (axios.isAxiosError(err)) {
-      const status = err.response?.status || 500;
-      const code = err.code || 'AXIOS_ERROR';
-      return res.status(status >= 400 && status < 600 ? status : 500).json({ ok: false, error: code, message: err.message });
-    }
-    return res.status(500).json({ ok: false, error: 'UNKNOWN', message: String(err?.message || err) });
-  }
-});
-
+// Endpoint para extracción completa (scraping + Gemini AI)
 scrape.get('/extract', async (req, res) => {
   try {
-    const { status, body } = await extractFromQuery(req.query);
+    const { status, body } = await extractionService.extractFromUrl(req.query);
+    if (status === 200 && (body as any)?.ok) {
+      try {
+        await HistoryService.append({
+          url: (body as any).url,
+          model: (body as any).model ?? null,
+          extracted: (body as any).extracted,
+        });
+      } catch (e) {
+        // no-op: history persistance should not break main flow
+      }
+    }
     return res.status(status).json(body);
-  } catch (err: any) {
-    if (axios.isAxiosError(err)) {
-      const status = err.response?.status || 500;
-      const code = err.code || 'AXIOS_ERROR';
-      return res.status(status >= 400 && status < 600 ? status : 500).json({ ok: false, error: code, message: err.message });
-    }
-    return res.status(500).json({ ok: false, error: 'UNKNOWN', message: String(err?.message || err) });
+  } catch (error) {
+    console.error('Extraction error:', error);
+    return res.status(500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      message: 'An unexpected error occurred during extraction'
+    });
   }
 });
 
-scrape.post('/pdf/extract', async (req, res) => {
+// Endpoint para listar historial de consultas
+scrape.get('/history', async (req, res) => {
   try {
-    const query = { url: req.body?.url, prompt: req.body?.prompt };
-    const { status, body } = await extractFromPdfUrl(query);
-    return res.status(status).json(body);
-  } catch (err: any) {
-    if (axios.isAxiosError(err)) {
-      const status = err.response?.status || 500;
-      const code = err.code || 'AXIOS_ERROR';
-      return res.status(status >= 400 && status < 600 ? status : 500).json({ ok: false, error: code, message: err.message });
-    }
-    return res.status(500).json({ ok: false, error: 'UNKNOWN', message: String(err?.message || err) });
+    const limitRaw = (req.query?.limit as string) || '';
+    const limit = Math.max(1, Math.min(200, Number(limitRaw) || 50));
+    const items = await HistoryService.list(limit);
+    return res.json({ ok: true, items });
+  } catch (error) {
+    console.error('History list error:', error);
+    return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'Failed to read history' });
   }
 });
 
-// Generate consolidated PDF report from multiple properties JSON
-scrape.post('/pdf/generate-report', async (req, res) => {
+// Endpoint para guardar manualmente una entrada en el historial
+scrape.post('/history', async (req, res) => {
   try {
-    const { title, properties } = req.body;
-    
-    if (!properties) {
-      return res.status(400).json({ 
-        ok: false, 
-        error: 'MISSING_PROPERTIES', 
-        message: 'Provide properties in request body' 
-      });
+    const { url, model, extracted } = (req as any).body || {};
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ ok: false, error: 'INVALID_BODY', message: 'url is required' });
     }
-
-    // Convert numbered object format to array if needed
-    let propsArray: InmoExtract[] = [];
-    
-    if (Array.isArray(properties)) {
-      propsArray = properties as InmoExtract[];
-    } else if (typeof properties === 'object') {
-      // Handle case where properties is an object with numbered keys like {0: {...}, 1: {...}}
-      const keys = Object.keys(properties).filter(k => !isNaN(Number(k))).sort((a, b) => Number(a) - Number(b));
-      propsArray = keys.map(k => properties[k] as InmoExtract);
-    }
-
-    if (propsArray.length === 0) {
-      return res.status(400).json({ 
-        ok: false, 
-        error: 'NO_VALID_PROPERTIES', 
-        message: 'No valid properties found in request' 
-      });
-    }
-
-    const { url: reportUrl } = await generateMultiPropertyReportPdf({ 
-      title: title || 'Reporte de Inmuebles',
-      properties: propsArray 
-    });
-
-    return res.status(200).json({ 
-      ok: true, 
-      reportPdf: reportUrl,
-      propertiesCount: propsArray.length,
-      title: title || 'Reporte de Inmuebles'
-    });
-
-  } catch (err: any) {
-    return res.status(500).json({ 
-      ok: false, 
-      error: 'PDF_GENERATION_ERROR', 
-      message: String(err?.message || err) 
-    });
+    const saved = await HistoryService.append({ url, model: model ?? null, extracted });
+    return res.status(201).json({ ok: true, entry: saved });
+  } catch (error) {
+    console.error('History save error:', error);
+    return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'Failed to save history' });
   }
 });
+
+// Generación de documento PDF por ID del historial
+scrape.get('/document/:id', async (req, res) => {
+  try {
+    const { id } = req.params as { id: string };
+    if (!id) return res.status(400).json({ ok: false, error: 'INVALID_ID' });
+
+    const entry = await HistoryService.getById(id);
+    if (!entry) return res.status(404).json({ ok: false, error: 'NOT_FOUND', message: 'History entry not found' });
+
+    const data = (entry as any).extracted || {};
+    const contactName = env.contactName || data.contactName || '';
+    const contactPhone = env.contactPhone || data.contactPhone || '';
+    const style = (req.query?.style as string) || 'ml';
+
+    // Configurar headers de respuesta
+    const safeTitle = (data.title || 'document').toString().replace(/[^a-z0-9\-_. ]/gi, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${safeTitle}.pdf"`);
+
+    const doc = new PDFDocument({ size: 'A4', margin: 26 });
+    doc.pipe(res);
+
+    // Header (logo arriba)
+    const leftX = 26;
+    const rightX = 569; // A4 595 - margin 26
+    try {
+      const candidates = ['logo.jpeg', 'logo.jpg', 'logo.png', 'logo.webp'];
+      let found: string | null = null;
+      for (const name of candidates) {
+        const p = path.resolve('public', name);
+        try { await fs.access(p); found = p; break; } catch {}
+      }
+      if (found) {
+        doc.image(found, leftX, 6, { width: 110 });
+      }
+    } catch {}
+
+    // Contacto en header derecha
+    const headerY = 8;
+    doc.fontSize(10).text('Contacto', rightX - 156, headerY, { width: 156, align: 'right' });
+    if (contactName) doc.fontSize(10).text(contactName, rightX - 156, headerY + 14, { width: 156, align: 'right' });
+    if (contactPhone) doc.fontSize(10).text(contactPhone, rightX - 156, headerY + 28, { width: 156, align: 'right' });
+
+    // Separador
+    const sepY = 58;
+    doc.moveTo(leftX, sepY).lineTo(rightX, sepY).strokeColor('#e5e7eb').stroke();
+
+    // Imágenes
+    const images: string[] = Array.isArray(data.images) ? data.images : [];
+    async function fetchImage(url: string): Promise<Buffer | null> {
+      try {
+        const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 8000 });
+        return Buffer.from(resp.data);
+      } catch { return null; }
+    }
+    // Layout dos columnas (diseño anterior)
+    const colLeftX = leftX;
+    const colLeftW = 300;
+    const colRightX = leftX + colLeftW + 18; // gap 18
+    const colRightW = rightX - colRightX;
+
+    const heroUrl = images[0];
+    const thumbUrls = images.slice(1, 5);
+
+    // Hero
+    const heroY = 96;
+    if (heroUrl) {
+      const buf = await fetchImage(heroUrl);
+      if (buf) {
+        try { doc.image(buf, colLeftX, heroY, { fit: [colLeftW, 260], align: 'center', valign: 'center' }); } catch {}
+      } else {
+        doc.rect(colLeftX, heroY, colLeftW, 260).strokeColor('#d1d5db').stroke();
+      }
+    } else {
+      doc.rect(colLeftX, heroY, colLeftW, 260).strokeColor('#d1d5db').stroke();
+    }
+
+    // Thumbnails fila 4
+    const thumbY = heroY + 270;
+    const thumbSize = 64;
+    const thumbGap = 12;
+    for (let i = 0; i < thumbUrls.length; i++) {
+      const x = colLeftX + i * (thumbSize + thumbGap);
+      const b = await fetchImage(thumbUrls[i]);
+      if (b) {
+        try { doc.image(b, x, thumbY, { fit: [thumbSize, thumbSize] }); } catch {}
+      } else {
+        doc.rect(x, thumbY, thumbSize, thumbSize).strokeColor('#d1d5db').stroke();
+      }
+    }
+
+    // Columna derecha detalles
+    let y = heroY;
+    const title = String(data.title || 'Propiedad');
+    doc.fontSize(16).text(title, colRightX, y, { width: colRightW });
+    y = doc.y + 8;
+
+    if (data.price != null) {
+      const priceLine = `${data.currency ? data.currency + ' ' : ''}${data.price}`;
+      doc.fillColor('#10b981').fontSize(22).text(priceLine, colRightX, y, { width: colRightW });
+      doc.fillColor('#000000');
+      y = doc.y + 8;
+    }
+
+    const location = [data.address, data.city, data.state, data.country].filter(Boolean).join(', ');
+    if (location) { doc.fontSize(11).fillColor('#374151').text(location, colRightX, y, { width: colRightW }); y = doc.y + 10; }
+    doc.fillColor('#000000');
+
+    const quick: string[] = [];
+    if (data.bedrooms != null) quick.push(`Recámaras: ${data.bedrooms}`);
+    if (data.bathrooms != null) quick.push(`Baños: ${data.bathrooms}`);
+    if (data.parkingSpots != null) quick.push(`Estac.: ${data.parkingSpots}`);
+    if (data.areaM2 != null) quick.push(`Construcción: ${data.areaM2} m²`);
+    if (data.lotM2 != null) quick.push(`Terreno: ${data.lotM2} m²`);
+    if (quick.length) { doc.fontSize(11).text(quick.join('   •   '), colRightX, y, { width: colRightW }); y = doc.y + 12; }
+
+    if (Array.isArray(data.amenities) && data.amenities.length) {
+      doc.fontSize(12).text('Amenidades', colRightX, y, { width: colRightW, underline: true });
+      y = doc.y + 6;
+      const list = data.amenities.slice(0, 20).join(', ');
+      doc.fontSize(11).text(list, colRightX, y, { width: colRightW });
+      y = doc.y + 12;
+    }
+
+    if (data.description) {
+      doc.fontSize(12).text('Descripción', colRightX, y, { width: colRightW, underline: true });
+      y = doc.y + 6;
+      doc.fontSize(11).text(String(data.description), colRightX, y, { width: colRightW });
+      y = doc.y + 12;
+    }
+
+/*     if (entry.url) {
+      doc.fontSize(10).fillColor('#2563eb').text(String(entry.url), colRightX, y, { width: colRightW, link: String(entry.url), underline: true });
+      doc.fillColor('#000000');
+    } */
+
+    doc.end();
+  } catch (error) {
+    console.error('Document generate error:', error);
+    return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'Failed to generate document' });
+  }
+});
+
+
+

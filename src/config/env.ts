@@ -8,4 +8,6 @@ export const env = {
   geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
   chatpdfApiKey: process.env.CHATPDF_API_KEY || '',
   chatpdfBaseUrl: process.env.CHATPDF_BASE_URL || 'https://api.chatpdf.com/v1',
+  contactPhone: process.env.CONTACT_PHONE || '',
+  contactName: process.env.CONTACT_NAME || '',
 };

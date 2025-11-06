@@ -4,8 +4,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import pinoHttp from 'pino-http';
-import { health } from './routes/health';
 import { scrape } from './routes/scrape';
+import { errorHandler } from './middleware/error-handler';
 
 export const app = express();
 
@@ -19,12 +19,7 @@ app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHead
 // Serve local storage (PDFs and extracted images)
 app.use('/static', express.static(path.resolve('storage')));
 
-app.use(health);
 app.use(scrape);
 
 // Centralized error handler
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  const status = typeof err?.status === 'number' ? err.status : 500;
-  res.status(status).json({ ok: false, error: 'INTERNAL_ERROR', message: err?.message || 'Unexpected error' });
-});
+app.use(errorHandler);
