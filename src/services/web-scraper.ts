@@ -56,36 +56,77 @@ export class WebScraperService {
     const urlObj = new URL(url);
     const isInmuebles24 = urlObj.hostname.includes('inmuebles24.com');
 
-    const desktopUA = WebScraperService.USER_AGENTS[
-      Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)
-    ];
+    // Usar un User-Agent móvil por defecto para inmuebles24
+    const desktopUA = isInmuebles24 
+      ? 'Mozilla/5.0 (Linux; Android 10; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+      : WebScraperService.USER_AGENTS[
+          Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)
+        ];
 
     const baseHeaders: Record<string, string> = {
       'User-Agent': desktopUA,
-      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8,en-US;q=0.7',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Cache-Control': 'max-age=0',
+      'DNT': '1',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
     };
 
     if (isInmuebles24) {
+      // Headers específicos para inmuebles24
       baseHeaders['Referer'] = 'https://www.google.com/';
-      baseHeaders['Upgrade-Insecure-Requests'] = '1';
-      baseHeaders['Sec-Fetch-Dest'] = 'document';
-      baseHeaders['Sec-Fetch-Mode'] = 'navigate';
       baseHeaders['Sec-Fetch-Site'] = 'cross-site';
+      // Agregar cookies comunes
+      baseHeaders['Cookie'] = 'cookieConsent=true; _ga=GA1.1.1234567890.1234567890; _gid=GA1.1.1234567890.1234567890';
     }
 
-    const attempt = async (headers: Record<string, string>) => {
-      const resp = await axios.get<string>(url, {
-        timeout: env.scrapeTimeoutMs,
-        maxRedirects: 5,
-        maxContentLength: env.scrapeMaxBytes,
-        maxBodyLength: env.scrapeMaxBytes,
-        headers,
-        responseType: 'text',
-        // Permitimos todos los códigos para manejar lógica propia de reintentos
-        validateStatus: () => true,
-      });
-      return resp;
+    const attempt = async (headers: Record<string, string>, isRetry = false) => {
+      try {
+        // Agregar un pequeño retraso aleatorio entre 1-3 segundos para inmuebles24
+        if (isInmuebles24) {
+          const delay = 1000 + Math.random() * 2000; // 1-3 segundos
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+
+        const resp = await axios.get<string>(url, {
+          timeout: isInmuebles24 ? 30000 : env.scrapeTimeoutMs, // 30 segundos para inmuebles24
+          maxRedirects: 5,
+          maxContentLength: env.scrapeMaxBytes,
+          maxBodyLength: env.scrapeMaxBytes,
+          headers: {
+            ...headers,
+            // Rotar User-Agent ligeramente en cada intento
+            'User-Agent': isRetry && !isInmuebles24 
+              ? WebScraperService.MOBILE_UA 
+              : headers['User-Agent']
+          },
+          responseType: 'text',
+          validateStatus: () => true,
+        });
+
+        // Si es inmuebles24 y detectamos una página de bloqueo, lanzar error
+        if (isInmuebles24 && 
+            (resp.data.includes('distil_r_block') || 
+             resp.data.includes('Access Denied') ||
+             resp.status === 403)) {
+          throw new Error('BLOCKED_BY_ANTIBOT');
+        }
+
+        return resp;
+      } catch (error) {
+        if (axios.isAxiosError(error) && !error.response && !isRetry) {
+          // Si es un error de red y no es un reintento, esperar un poco y reintentar
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return attempt(headers, true);
+        }
+        throw error;
+      }
     };
 
     // 1) Intento con UA de escritorio

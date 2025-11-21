@@ -1,7 +1,14 @@
 import { WebScraperService } from './web-scraper';
 import { GeminiService } from './gemini';
 import { UrlQuerySchema } from '../schemas/validation';
-import { ApiResponse, PropertyExtraction } from '../types/scraping';
+import { 
+  ApiResponse, 
+  PropertyExtraction, 
+  ScrapeSuccessResponse, 
+  ScrapeErrorResponse, 
+  ExtractionSuccessResponse, 
+  ExtractionErrorResponse 
+} from '../types/scraping';
 
 export class ExtractionService {
   private webScraper: WebScraperService;
@@ -25,8 +32,10 @@ export class ExtractionService {
           body: {
             ok: false,
             error: 'INVALID_URL',
+            message: 'URL de entrada no válida',
             details: validation.error.flatten(),
-          },
+            solution: 'Por favor, verifica que la URL sea correcta y esté completa.'
+          } as ExtractionErrorResponse,
         };
       }
 
@@ -46,7 +55,7 @@ export class ExtractionService {
           url,
           model: this.geminiService.getModelName(),
           extracted: extractedData,
-        },
+        } as ExtractionSuccessResponse,
       };
 
     } catch (error) {
@@ -67,8 +76,10 @@ export class ExtractionService {
           body: {
             ok: false,
             error: 'INVALID_URL',
+            message: 'URL de entrada no válida',
             details: validation.error.flatten(),
-          },
+            solution: 'Por favor, verifica que la URL sea correcta y esté completa.'
+          } as ScrapeErrorResponse,
         };
       }
 
@@ -84,7 +95,7 @@ export class ExtractionService {
           ok: true,
           url,
           data: scrapedData,
-        },
+        } as ScrapeSuccessResponse,
       };
 
     } catch (error) {
@@ -97,35 +108,121 @@ export class ExtractionService {
    */
   private handleError(error: unknown): ApiResponse {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error('Error en handleError:', error);
 
     // Errores específicos del scraper
     if (errorMessage.includes('UNSUPPORTED_PROTOCOL')) {
       return {
         status: 400,
-        body: { ok: false, error: 'UNSUPPORTED_PROTOCOL', message: 'Only HTTP and HTTPS protocols are supported' },
+        body: { 
+          ok: false, 
+          error: 'UNSUPPORTED_PROTOCOL', 
+          message: 'Solo se permiten protocolos HTTP y HTTPS',
+          solution: 'Asegúrate de que la URL comience con http:// o https://'
+        },
       };
     }
 
     if (errorMessage.includes('BLOCKED_HOST') || errorMessage.includes('BLOCKED_PRIVATE_IP')) {
       return {
         status: 400,
-        body: { ok: false, error: 'BLOCKED_HOST', message: 'Host is blocked or private' },
+        body: { 
+          ok: false, 
+          error: 'BLOCKED_HOST', 
+          message: 'El host está bloqueado o es una dirección IP privada',
+          solution: 'No se pueden acceder a hosts bloqueados o direcciones IP privadas'
+        },
+      };
+    }
+
+    if (errorMessage.includes('BLOCKED_BY_ANTIBOT')) {
+      return {
+        status: 429,
+        body: {
+          ok: false,
+          error: 'ANTI_BOT_DETECTED',
+          message: 'El sitio web ha detectado actividad automatizada',
+          solution: 'Intenta de nuevo más tarde o usa un servicio de proxy'
+        }
       };
     }
 
     if (errorMessage.includes('DNS_RESOLUTION_FAILED')) {
       return {
         status: 400,
-        body: { ok: false, error: 'DNS_RESOLUTION_FAILED', message: 'Could not resolve hostname' },
+        body: { 
+          ok: false, 
+          error: 'DNS_RESOLUTION_FAILED', 
+          message: 'No se pudo resolver el nombre de dominio',
+          solution: 'Verifica que la URL sea correcta y que tengas conexión a internet'
+        },
       };
     }
 
     // Errores HTTP
     if (errorMessage.includes('HTTP_ERROR')) {
       const [, details] = errorMessage.split('HTTP_ERROR: ');
+      
+      // Detectar códigos de estado comunes
+      if (details.includes('STATUS_403')) {
+        return {
+          status: 403,
+          body: {
+            ok: false,
+            error: 'FORBIDDEN',
+            message: 'Acceso denegado por el servidor',
+            details: 'El servidor ha rechazado la solicitud (403 Forbidden)',
+            solution: 'El sitio web puede estar bloqueando solicitudes automatizadas. Intenta con un User-Agent diferente o un servicio de proxy.'
+          }
+        };
+      }
+      
+      if (details.includes('STATUS_404')) {
+        return {
+          status: 404,
+          body: {
+            ok: false,
+            error: 'NOT_FOUND',
+            message: 'La página no existe (404)',
+            solution: 'Verifica que la URL sea correcta y que la página aún esté disponible'
+          }
+        };
+      }
+      
+      if (details.includes('STATUS_429')) {
+        return {
+          status: 429,
+          body: {
+            ok: false,
+            error: 'TOO_MANY_REQUESTS',
+            message: 'Demasiadas solicitudes',
+            solution: 'El sitio web está limitando las solicitudes. Espera unos minutos antes de intentar nuevamente.'
+          }
+        };
+      }
+
+      // Error HTTP genérico
       return {
         status: 500,
-        body: { ok: false, error: 'HTTP_ERROR', message: details || 'HTTP request failed' },
+        body: { 
+          ok: false, 
+          error: 'HTTP_ERROR', 
+          message: `Error en la solicitud HTTP: ${details || 'Error desconocido'}`,
+          solution: 'Verifica tu conexión a internet y que el sitio web esté disponible'
+        },
+      };
+    }
+
+    // Errores de timeout
+    if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
+      return {
+        status: 504,
+        body: {
+          ok: false,
+          error: 'REQUEST_TIMEOUT',
+          message: 'La solicitud ha excedido el tiempo de espera',
+          solution: 'El servidor está tardando demasiado en responder. Intenta de nuevo más tarde o verifica tu conexión a internet.'
+        }
       };
     }
 
@@ -133,21 +230,38 @@ export class ExtractionService {
     if (errorMessage.includes('GEMINI_API_KEY is required')) {
       return {
         status: 500,
-        body: { ok: false, error: 'MISSING_GEMINI_API_KEY', message: 'Gemini API key is not configured' },
+        body: { 
+          ok: false, 
+          error: 'MISSING_GEMINI_API_KEY', 
+          message: 'No se ha configurado la clave de API de Gemini',
+          solution: 'Asegúrate de configurar la variable de entorno GEMINI_API_KEY'
+        },
       };
     }
 
     if (errorMessage.includes('Gemini extraction failed')) {
       return {
         status: 500,
-        body: { ok: false, error: 'GEMINI_ERROR', message: errorMessage },
+        body: { 
+          ok: false, 
+          error: 'GEMINI_ERROR', 
+          message: 'Error al procesar la información con Gemini AI',
+          details: errorMessage,
+          solution: 'Verifica que la API de Gemini esté funcionando correctamente y que la respuesta del sitio web sea válida'
+        },
       };
     }
 
     // Error genérico
     return {
       status: 500,
-      body: { ok: false, error: 'INTERNAL_ERROR', message: errorMessage },
+      body: { 
+        ok: false, 
+        error: 'INTERNAL_ERROR', 
+        message: 'Error interno del servidor',
+        details: errorMessage,
+        solution: 'Por favor, intenta de nuevo más tarde. Si el problema persiste, contacta al soporte técnico.'
+      },
     };
   }
 }

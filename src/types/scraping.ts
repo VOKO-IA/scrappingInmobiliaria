@@ -53,25 +53,43 @@ export interface PropertyExtraction {
   _raw?: any;
 }
 
-export interface ScrapeResponse {
-  ok: boolean;
-  status?: number;
-  url?: string;
-  data?: ScrapedData;
-  message?: string;
-  error?: string;
+// Respuesta base para errores
+export interface ErrorResponse {
+  ok: false;
+  error: string;
+  message: string;
   details?: any;
+  solution?: string;
 }
 
-export interface ExtractionResponse {
-  ok: boolean;
-  url?: string;
-  model?: string;
-  extracted?: PropertyExtraction;
-  message?: string;
-  error?: string;
-  details?: any;
+// Respuesta exitosa para scraping
+export interface ScrapeSuccessResponse {
+  ok: true;
+  url: string;
+  data: ScrapedData;
 }
+
+// Respuesta de error para scraping
+export interface ScrapeErrorResponse extends ErrorResponse {
+  status?: number;
+}
+
+export type ScrapeResponse = ScrapeSuccessResponse | ScrapeErrorResponse;
+
+// Respuesta exitosa para extracción
+export interface ExtractionSuccessResponse {
+  ok: true;
+  url: string;
+  model: string;
+  extracted: PropertyExtraction;
+}
+
+// Respuesta de error para extracción
+export interface ExtractionErrorResponse extends ErrorResponse {
+  model?: string;
+}
+
+export type ExtractionResponse = ExtractionSuccessResponse | ExtractionErrorResponse;
 
 export interface ApiResponse {
   status: number;
