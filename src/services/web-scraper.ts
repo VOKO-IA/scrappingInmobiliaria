@@ -153,99 +153,176 @@ export class WebScraperService {
    */
   private async fetchPage(url: string) {
     const urlObj = new URL(url);
-    const isInmuebles24 = urlObj.hostname.includes('inmuebles24.com');
 
-    // Usar un User-Agent móvil por defecto para inmuebles24
-    const desktopUA = isInmuebles24 
-      ? 'Mozilla/5.0 (Linux; Android 10; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
-      : WebScraperService.USER_AGENTS[
-          Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)
-        ];
+    // Dominios de inmobiliarias: usamos Puppeteer para mayor sigilo
+    const realEstateHosts = ['inmuebles24.com', 'vivanuncios.com', 'vivanuncios.com.mx', 'lamudi.com', 'lamudi.com.mx', 'mercadolibre.com', 'mercadolibre.com.mx'];
+    const shouldUsePuppeteer = this.usePuppeteer || realEstateHosts.some(h => urlObj.hostname.includes(h));
 
+    // Headers base para Axios
+    const baseUA = WebScraperService.USER_AGENTS[Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)];
     const baseHeaders: Record<string, string> = {
-      'User-Agent': desktopUA,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8,en-US;q=0.7',
+      'User-Agent': baseUA,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
       'Connection': 'keep-alive',
-      'Cache-Control': 'max-age=0',
-      'DNT': '1',
       'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
+      'DNT': '1',
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
+      'Sec-Fetch-User': '?1'
     };
 
-    if (isInmuebles24) {
-      // Headers específicos para inmuebles24
-      baseHeaders['Referer'] = 'https://www.google.com/';
-      baseHeaders['Sec-Fetch-Site'] = 'cross-site';
-      // Agregar cookies comunes
-      baseHeaders['Cookie'] = 'cookieConsent=true; _ga=GA1.1.1234567890.1234567890; _gid=GA1.1.1234567890.1234567890';
+    if (shouldUsePuppeteer) {
+      // Ruta con Puppeteer para evadir anti-bots sin proxies
+      const html = await this.fetchWithPuppeteer(url);
+      return { data: html, status: 200, statusText: 'OK' };
     }
 
-    const attempt = async (headers: Record<string, string>, isRetry = false) => {
+    // Ruta Axios con reintentos/backoff y timeouts más largos
+    const maxAttempts = 4; // más reintentos
+    let attemptNo = 0;
+    let lastError: any;
+
+    while (attemptNo < maxAttempts) {
       try {
-        // Agregar un pequeño retraso aleatorio entre 1-3 segundos para inmuebles24
-        if (isInmuebles24) {
-          const delay = 1000 + Math.random() * 2000; // 1-3 segundos
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
+        // Pausa humana aleatoria entre 800–2500 ms
+        await this.humanPause(800, 2500);
 
         const resp = await axios.get<string>(url, {
-          timeout: isInmuebles24 ? 30000 : env.scrapeTimeoutMs, // 30 segundos para inmuebles24
+          timeout: 90000, // 90s
           maxRedirects: 5,
           maxContentLength: env.scrapeMaxBytes,
           maxBodyLength: env.scrapeMaxBytes,
           headers: {
-            ...headers,
-            // Rotar User-Agent ligeramente en cada intento
-            'User-Agent': isRetry && !isInmuebles24 
-              ? WebScraperService.MOBILE_UA 
-              : headers['User-Agent']
+            ...baseHeaders,
+            'User-Agent': attemptNo === 0 ? baseUA : WebScraperService.MOBILE_UA
           },
           responseType: 'text',
           validateStatus: () => true,
         });
 
-        // Si es inmuebles24 y detectamos una página de bloqueo, lanzar error
-        if (isInmuebles24 && 
-            (resp.data.includes('distil_r_block') || 
-             resp.data.includes('Access Denied') ||
-             resp.status === 403)) {
-          throw new Error('BLOCKED_BY_ANTIBOT');
+        if (resp.status >= 200 && resp.status < 400) {
+          return resp;
         }
 
-        return resp;
-      } catch (error) {
-        if (axios.isAxiosError(error) && !error.response && !isRetry) {
-          // Si es un error de red y no es un reintento, esperar un poco y reintentar
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          return attempt(headers, true);
+        // Fallback: si recibimos 403/anti-bot, probar Puppeteer como último recurso
+        if (resp.status === 403 || (typeof resp.data === 'string' && /access denied|distil|captcha/i.test(resp.data))) {
+          // último intento: Puppeteer
+          const html = await this.fetchWithPuppeteer(url);
+          return { data: html, status: 200, statusText: 'OK' };
         }
-        throw error;
+
+        lastError = new Error(`HTTP_ERROR_STATUS_${resp.status}`);
+      } catch (err: any) {
+        lastError = err;
       }
-    };
 
-    // 1) Intento con UA de escritorio
-    let response = await attempt(baseHeaders);
-
-    // 2) Si falla y es inmuebles24, reintentar con UA móvil y mismos headers
-    if (isInmuebles24 && (response.status < 200 || response.status >= 400)) {
-      const mobileHeaders = { ...baseHeaders, 'User-Agent': WebScraperService.MOBILE_UA };
-      response = await attempt(mobileHeaders);
+      // Backoff exponencial con jitter
+      const base = 800;
+      const backoff = Math.min(5000, base * Math.pow(2, attemptNo)) + Math.floor(Math.random() * 400);
+      await this.humanPause(backoff, backoff + 600);
+      attemptNo++;
     }
 
-    if (response.status >= 200 && response.status < 400) {
-      return response;
-    }
+    throw lastError || new Error('REQUEST_FAILED');
+  }
 
-    const statusText = response.statusText || 'Request failed';
-    const bodyLen = typeof response.data === 'string' ? response.data.length : 0;
-    throw new Error(
-      `HTTP_ERROR: STATUS_${response.status} - ${statusText} [host=${urlObj.hostname} path=${urlObj.pathname} len=${bodyLen}]`
-    );
+  // Lanzar Puppeteer con configuración sigilosa
+  private async launchPuppeteer() {
+    const args = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--lang=es-ES,es',
+      '--window-size=1366,768',
+    ];
+
+    const browser = await puppeteer.launch({
+      headless: 'new',
+      args,
+      ignoreHTTPSErrors: true,
+      executablePath: executablePath(),
+      defaultViewport: {
+        width: 1366 + Math.floor(Math.random() * 120),
+        height: 768 + Math.floor(Math.random() * 120),
+        deviceScaleFactor: 1,
+        hasTouch: Math.random() < 0.2,
+        isLandscape: false,
+        isMobile: false,
+      },
+    } as any);
+
+    const page = await browser.newPage();
+
+    // UA y headers realistas
+    await page.setUserAgent(WebScraperService.USER_AGENTS[Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)]);
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1',
+    });
+
+    // Intercepción para bloquear recursos pesados
+    await page.setRequestInterception(true);
+    page.on('request', (req: any) => {
+      const type = req.resourceType();
+      if (['image', 'media', 'font', 'stylesheet'].includes(type)) return req.abort();
+      req.continue();
+    });
+
+    return { browser, page };
+  }
+
+  // Obtener HTML con comportamiento humano
+  private async fetchWithPuppeteer(url: string): Promise<string> {
+    const { browser, page } = await this.launchPuppeteer();
+    try {
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+
+      // Simular actividad humana
+      await this.humanPause(800, 1800);
+      await this.mouseWiggle(page);
+      await this.scrollPage(page, 1500 + Math.floor(Math.random() * 2000));
+
+      // Esperar elementos comunes de listados (si existen)
+      try {
+        await page.waitForSelector('a, h1, .listing, [role="main"]', { timeout: 4000 });
+      } catch {}
+
+      return await page.content();
+    } finally {
+      await browser.close();
+    }
+  }
+
+  private async scrollPage(page: any, durationMs = 2000) {
+    const start = Date.now();
+    while (Date.now() - start < durationMs) {
+      await page.evaluate((delta: number) => window.scrollBy(0, delta), 100 + Math.floor(Math.random() * 200));
+      await this.humanPause(120, 320);
+    }
+    // subir un poco
+    await page.evaluate(() => window.scrollBy(0, -200));
+  }
+
+  private async mouseWiggle(page: any) {
+    try {
+      const x = 50 + Math.floor(Math.random() * 400);
+      const y = 50 + Math.floor(Math.random() * 300);
+      // @ts-ignore
+      if (page.mouse && page.mouse.move) {
+        // @ts-ignore
+        await page.mouse.move(x, y, { steps: 8 + Math.floor(Math.random() * 6) });
+      }
+    } catch {}
+  }
+
+  private async humanPause(minMs: number, maxMs: number) {
+    const ms = minMs + Math.random() * (maxMs - minMs);
+    await new Promise(r => setTimeout(r, ms));
   }
 
   /**
