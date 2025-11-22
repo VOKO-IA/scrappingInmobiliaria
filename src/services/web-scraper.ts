@@ -1,20 +1,119 @@
-import axios from 'axios';
+import axios, { AxiosRequestConfig } from 'axios';
 import { load } from 'cheerio';
 import { env } from '../config/env';
 import { isBlockedHost } from '../utils/net';
 import { ScrapedData, ImageData, FigureData } from '../types/scraping';
+import * as https from 'https';
+import * as http from 'http';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { randomInt, randomFloat } from '../utils/random';
+import { performance } from 'perf_hooks';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { executablePath } from 'puppeteer';
+
+// Add type declaration for puppeteer-extra
+declare module 'puppeteer-extra' {
+  interface PuppeteerExtra {
+    use(plugin: any): PuppeteerExtra;
+  }
+}
+
+// Initialize puppeteer with stealth plugin
+puppeteer.use(StealthPlugin());
+
+// Interface for proxy configuration
+interface ProxyConfig {
+  host: string;
+  port: number;
+  protocol: 'http' | 'https' | 'socks4' | 'socks5';
+  username?: string;
+  password?: string;
+}
 
 export class WebScraperService {
   private static readonly USER_AGENTS = [
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    // Desktop
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+    
+    // Mobile
+    'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    
+    // Less common
+    'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0'
   ];
 
-  private static readonly MOBILE_UA =
-    'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+  // List of common HTTP headers to rotate
+  private static readonly COMMON_HEADERS = [
+    {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Cache-Control': 'max-age=0',
+      'TE': 'trailers'
+    },
+    {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'DNT': '1',
+      'Pragma': 'no-cache',
+      'Cache-Control': 'no-cache'
+    }
+  ];
+
+  // Proxy configuration
+  private proxyConfig: ProxyConfig | null = null;
+  private proxyList: ProxyConfig[] = [];
+  private currentProxyIndex = 0;
+  private usePuppeteer = false; // Toggle between axios and puppeteer
+  
+  // Request timing
+  private lastRequestTime = 0;
+  private minDelay = 2000; // 2 seconds minimum between requests
+  private maxDelay = 10000; // 10 seconds maximum between requests
 
   private static readonly MIN_DIMENSION_PX = 150;
+  
+  // Mobile User-Agent constant
+  private static readonly MOBILE_UA = 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+  constructor(usePuppeteer: boolean = false) {
+    this.usePuppeteer = usePuppeteer;
+    this.initializeProxies();
+  }
+
+  /**
+   * Initialize proxy configuration if needed
+   */
+  private initializeProxies(): void {
+    // You can load proxies from environment variables or a config file here
+    // Example:
+    // if (process.env.PROXY_LIST) {
+    //   this.proxyList = JSON.parse(process.env.PROXY_LIST);
+    //   this.rotateProxy();
+    // }
+  }
 
   /**
    * Realiza el scraping de una URL y extrae el contenido
