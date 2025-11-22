@@ -175,7 +175,11 @@ export class WebScraperService {
 
     if (shouldUsePuppeteer) {
       // Ruta con Puppeteer para evadir anti-bots sin proxies
-      const html = await this.fetchWithPuppeteer(url);
+      let html = await this.fetchWithPuppeteer(url, { allowHeavy: false });
+      // Si el HTML luce muy pequeño o vacío, reintentar permitiendo recursos pesados y espera extra
+      if (!html || html.length < 3000) {
+        html = await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 3000 });
+      }
       return { data: html, status: 200, statusText: 'OK' };
     }
 
@@ -229,7 +233,7 @@ export class WebScraperService {
   }
 
   // Lanzar Puppeteer con configuración sigilosa
-  private async launchPuppeteer() {
+  private async launchPuppeteer(allowHeavy = false) {
     const args = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -280,22 +284,38 @@ export class WebScraperService {
       'Upgrade-Insecure-Requests': '1',
     });
 
-    // Intercepción para bloquear recursos pesados
-    await page.setRequestInterception(true);
-    page.on('request', (req: any) => {
-      const type = req.resourceType();
-      if (['image', 'media', 'font', 'stylesheet'].includes(type)) return req.abort();
-      req.continue();
-    });
+    // Intercepción para bloquear recursos pesados (si no se permite heavy)
+    if (!allowHeavy) {
+      await page.setRequestInterception(true);
+      page.on('request', (req: any) => {
+        const type = req.resourceType();
+        if (['image', 'media', 'font', 'stylesheet'].includes(type)) return req.abort();
+        req.continue();
+      });
+    }
 
     return { browser, page };
   }
 
   // Obtener HTML con comportamiento humano
-  private async fetchWithPuppeteer(url: string): Promise<string> {
-    const { browser, page } = await this.launchPuppeteer();
+  private async fetchWithPuppeteer(url: string, opts?: { allowHeavy?: boolean; extraWaitMs?: number }): Promise<string> {
+    const allowHeavy = !!opts?.allowHeavy;
+    const extraWaitMs = opts?.extraWaitMs ?? 0;
+    const { browser, page } = await this.launchPuppeteer(allowHeavy);
     try {
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+
+      // Intentar aceptar cookies comunes
+      try {
+        await new Promise(r => setTimeout(r, 600));
+        await page.evaluate(() => {
+          const byId = document.getElementById('onetrust-accept-btn-handler');
+          if (byId) (byId as HTMLButtonElement).click();
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const cand = buttons.find(b => /aceptar|accept/i.test(b.innerText || ''));
+          if (cand) cand.click();
+        });
+      } catch {}
 
       // Simular actividad humana
       await this.humanPause(800, 1800);
@@ -304,8 +324,12 @@ export class WebScraperService {
 
       // Esperar elementos comunes de listados (si existen)
       try {
-        await page.waitForSelector('a, h1, .listing, [role="main"]', { timeout: 4000 });
+        await page.waitForSelector('a, h1, .listing, [role="main"], [itemtype*="schema.org/Offer"], [itemtype*="schema.org/Product"]', { timeout: 5000 });
       } catch {}
+
+      if (extraWaitMs > 0) {
+        await new Promise(r => setTimeout(r, extraWaitMs));
+      }
 
       return await page.content();
     } finally {
@@ -346,10 +370,29 @@ export class WebScraperService {
   private parseHtml(html: string, baseUrl: string): ScrapedData {
     const $ = load(html);
 
-    // Remover elementos no deseados
-    $('script,style,noscript,template,svg,canvas,iframe,meta,link,head').remove();
-
+    // Capturar el título ANTES de limpiar el DOM y evitar eliminar el head
     const title = $('title').first().text().trim();
+
+    // Capturar JSON-LD antes de eliminar <script> (muchos portales inmobiliarios lo usan)
+    const jsonLdRaw: string = $('script[type="application/ld+json"]').map((_: any, el: any) => {
+      return (el && el.children && el.children[0] && (el.children[0] as any).data) || '';
+    }).get().filter(Boolean).join('\n');
+
+    // Capturar Next.js __NEXT_DATA__ si existe (SSR/SPA)
+    const nextDataRaw: string = $('#__NEXT_DATA__').map((_: any, el: any) => {
+      return (el && el.children && el.children[0] && (el.children[0] as any).data) || '';
+    }).get().filter(Boolean).join('\n');
+
+    // Capturar metas OpenGraph/SEO relevantes
+    const metaSnippets: string[] = [];
+    $('meta[property^="og:"], meta[name^="og:"], meta[name="description"], meta[property="article:published_time"]').each((_: any, el: any) => {
+      const name = $(el).attr('property') || $(el).attr('name') || '';
+      const content = ($(el).attr('content') || '').trim();
+      if (name && content) metaSnippets.push(`${name}: ${content}`);
+    });
+
+    // Remover elementos no deseados (pero conservamos <head> para no perder el título)
+    $('script,style,noscript,template,svg,canvas,iframe,meta,link').remove();
     
     // Extraer imágenes
     const images = this.extractImages($, baseUrl);
@@ -359,7 +402,25 @@ export class WebScraperService {
     
     // Extraer texto del body
     const bodyTextRaw = $('body').text();
-    const text = bodyTextRaw.replace(/\s+/g, ' ').trim();
+    let text = bodyTextRaw.replace(/\s+/g, ' ').trim();
+
+    // Adjuntar JSON-LD para enriquecer el contexto del extractor
+    if (jsonLdRaw) {
+      const trimmedLd = jsonLdRaw.slice(0, 50000);
+      text = `${text}\n${trimmedLd}`.trim();
+    }
+
+    // Adjuntar __NEXT_DATA__ si está presente
+    if (nextDataRaw) {
+      const trimmedNext = nextDataRaw.slice(0, 50000);
+      text = `${text}\n${trimmedNext}`.trim();
+    }
+
+    // Adjuntar metas relevantes
+    if (metaSnippets.length) {
+      const metasJoined = metaSnippets.join('\n').slice(0, 2000);
+      text = `${text}\n${metasJoined}`.trim();
+    }
     const wordCount = text ? text.split(/\s+/).length : 0;
 
     return {
