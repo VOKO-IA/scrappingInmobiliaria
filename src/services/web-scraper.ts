@@ -327,6 +327,9 @@ export class WebScraperService {
         await page.waitForSelector('a, h1, .listing, [role="main"], [itemtype*="schema.org/Offer"], [itemtype*="schema.org/Product"]', { timeout: 5000 });
       } catch {}
 
+      // Evitar capturar intersticiales tipo "Un momento…" (común en Inmuebles24)
+      await this.waitForRealContent(page, new URL(url).hostname);
+
       if (extraWaitMs > 0) {
         await new Promise(r => setTimeout(r, extraWaitMs));
       }
@@ -362,6 +365,36 @@ export class WebScraperService {
   private async humanPause(minMs: number, maxMs: number) {
     const ms = minMs + Math.random() * (maxMs - minMs);
     await new Promise(r => setTimeout(r, ms));
+  }
+
+  // Espera hasta que haya contenido real (evita pantallas intermedias tipo "Un momento…")
+  private async waitForRealContent(page: any, hostname: string) {
+    const isI24 = /inmuebles24\.com/i.test(hostname);
+    const deadline = Date.now() + 15000; // hasta 15s
+    let reloaded = false;
+
+    while (Date.now() < deadline) {
+      const state = await page.evaluate(() => ({
+        title: document.title || '',
+        bodyLen: (document.querySelector('body')?.innerText || '').trim().length,
+      }));
+
+      const looksInterstitial = /un momento|checking your browser|verificando|please wait/i.test(state.title);
+      const enoughBody = state.bodyLen > 1200; // contenido razonable
+
+      if ((!looksInterstitial || !isI24) && enoughBody) return;
+
+      // Intentar una recarga si seguimos en intersticial
+      if (isI24 && looksInterstitial && !reloaded) {
+        try {
+          await page.reload({ waitUntil: 'networkidle2', timeout: 15000 });
+        } catch {}
+        reloaded = true;
+      }
+
+      await this.humanPause(400, 900);
+      await this.scrollPage(page, 600);
+    }
   }
 
   /**
