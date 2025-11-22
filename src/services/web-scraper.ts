@@ -238,11 +238,11 @@ export class WebScraperService {
       '--window-size=1366,768',
     ];
 
-    const browser = await puppeteer.launch({
+    // Construir opciones de lanzamiento sin forzar executablePath.
+    const launchOptions: any = {
       headless: 'new',
       args,
       ignoreHTTPSErrors: true,
-      executablePath: executablePath(),
       defaultViewport: {
         width: 1366 + Math.floor(Math.random() * 120),
         height: 768 + Math.floor(Math.random() * 120),
@@ -251,7 +251,22 @@ export class WebScraperService {
         isLandscape: false,
         isMobile: false,
       },
-    } as any);
+    };
+
+    // 1) Si el entorno define PUPPETEER_EXECUTABLE_PATH, úsalo.
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    } else {
+      // 2) Intenta obtener executablePath() y si falla, lo omitimos para que Puppeteer resuelva por defecto.
+      try {
+        const ep = executablePath();
+        if (ep) launchOptions.executablePath = ep;
+      } catch {
+        // Sin executablePath explícito. Puppeteer intentará usar su Chromium instalado.
+      }
+    }
+
+    const browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
 
