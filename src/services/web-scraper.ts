@@ -273,6 +273,11 @@ export class WebScraperService {
     const browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
+    // Aumentar timeouts por defecto
+    try {
+      page.setDefaultTimeout(60000); // 60s para waitFor*
+      page.setDefaultNavigationTimeout(150000); // 150s navegación
+    } catch {}
 
     // UA y headers realistas
     await page.setUserAgent(WebScraperService.USER_AGENTS[Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)]);
