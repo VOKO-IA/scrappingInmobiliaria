@@ -149,6 +149,48 @@ export class WebScraperService {
   }
 
   /**
+   * Devuelve el HTML crudo (sin parsear) usando la misma lógica anti-bot.
+   */
+  public async fetchRawHtml(url: string): Promise<string> {
+    const urlObj = new URL(url);
+    const realEstateHosts = ['inmuebles24.com', 'vivanuncios.com', 'vivanuncios.com.mx', 'lamudi.com', 'lamudi.com.mx', 'mercadolibre.com', 'mercadolibre.com.mx'];
+    const shouldUsePuppeteer = this.usePuppeteer || realEstateHosts.some(h => urlObj.hostname.includes(h));
+
+    if (shouldUsePuppeteer) {
+      return await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 5000 });
+    }
+
+    const baseUA = WebScraperService.USER_AGENTS[Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)];
+    const resp = await axios.get<string>(url, {
+      timeout: 120000,
+      maxRedirects: 5,
+      maxContentLength: env.scrapeMaxBytes,
+      maxBodyLength: env.scrapeMaxBytes,
+      responseType: 'text',
+      headers: {
+        'User-Agent': baseUA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+      },
+      validateStatus: () => true,
+    });
+    if (resp.status >= 200 && resp.status < 400) {
+      // Si huele a antibot aunque sea 200, podemos caer a Puppeteer
+      const body = resp.data || '';
+      if (/access denied|distil|captcha/i.test(body)) {
+        return await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 5000 });
+      }
+      return body;
+    }
+    if (resp.status === 403 || resp.status === 429) {
+      return await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 5000 });
+    }
+    throw new Error(`HTTP_ERROR: STATUS_${resp.status}`);
+  }
+
+  /**
    * Realiza la petición HTTP a la URL
    */
   private async fetchPage(url: string) {
