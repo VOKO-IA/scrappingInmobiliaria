@@ -9,13 +9,20 @@ import { errorHandler } from './middleware/error-handler';
 
 export const app = express();
 
-// Render/Cloud providers sit behind a proxy; trust it so req.ip and rate limits work with X-Forwarded-For
-app.set('trust proxy', true);
+// Confía solo en el primer proxy (p. ej., Render) para mitigar spoofing de X-Forwarded-For
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '200kb' }));
 app.use(pinoHttp());
-app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
+app.use(rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Usar la IP calculada por Express (respeta trust proxy=1)
+  keyGenerator: (req) => req.ip || (req.socket.remoteAddress ?? 'unknown'),
+}));
 
 // Serve local storage (PDFs and extracted images)
 app.use('/static', express.static(path.resolve('storage')));

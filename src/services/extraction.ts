@@ -13,10 +13,26 @@ import {
 export class ExtractionService {
   private webScraper: WebScraperService;
   private geminiService: GeminiService;
+  // Timeout máximo por solicitud (ms)
+  private readonly REQUEST_TIMEOUT_MS = 90_000;
 
   constructor() {
     this.webScraper = new WebScraperService();
     this.geminiService = new GeminiService();
+  }
+
+  // Utilidad para limitar tiempo máximo por operación
+  private async withTimeout<T>(promise: Promise<T>, ms: number, tag: string): Promise<T> {
+    let timeoutId: any;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(tag)), ms);
+    });
+    try {
+      const result = await Promise.race([promise, timeoutPromise]);
+      return result as T;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   /**
@@ -41,11 +57,11 @@ export class ExtractionService {
 
       const { url } = validation.data;
 
-      // 2. Realizar scraping de la página web
-      const scrapedData = await this.webScraper.scrapeUrl(url);
+      // 2. Realizar scraping de la página web (con timeout)
+      const scrapedData = await this.withTimeout(this.webScraper.scrapeUrl(url), this.REQUEST_TIMEOUT_MS, 'SCRAPE_TIMEOUT');
 
-      // 3. Extraer información usando Gemini AI
-      const extractedData = await this.geminiService.extractPropertyInfo(url, scrapedData);
+      // 3. Extraer información usando Gemini AI (con timeout)
+      const extractedData = await this.withTimeout(this.geminiService.extractPropertyInfo(url, scrapedData), this.REQUEST_TIMEOUT_MS, 'GEMINI_TIMEOUT');
 
       // 4. Retornar respuesta exitosa
       return {
@@ -85,8 +101,8 @@ export class ExtractionService {
 
       const { url } = validation.data;
 
-      // 2. Realizar scraping de la página web
-      const scrapedData = await this.webScraper.scrapeUrl(url);
+      // 2. Realizar scraping de la página web (con timeout)
+      const scrapedData = await this.withTimeout(this.webScraper.scrapeUrl(url), this.REQUEST_TIMEOUT_MS, 'SCRAPE_TIMEOUT');
 
       // 3. Retornar datos scrapeados
       return {
@@ -109,6 +125,32 @@ export class ExtractionService {
   private handleError(error: unknown): ApiResponse {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     console.error('Error en handleError:', error);
+
+    // Timeout de solicitud total
+    if (errorMessage.includes('SCRAPE_TIMEOUT') || errorMessage.includes('GEMINI_TIMEOUT')) {
+      return {
+        status: 504,
+        body: {
+          ok: false,
+          error: 'REQUEST_TIMEOUT',
+          message: 'La operación excedió el tiempo máximo permitido',
+          solution: 'Intenta nuevamente más tarde o reduce la complejidad del contenido.'
+        }
+      };
+    }
+
+    // Errores Puppeteer comunes
+    if (/PUPPETEER_PROTOCOL_TIMEOUT|Navigation timeout|ProtocolError/i.test(errorMessage)) {
+      return {
+        status: 504,
+        body: {
+          ok: false,
+          error: 'BROWSER_TIMEOUT',
+          message: 'El navegador tardó demasiado en renderizar la página',
+          solution: 'Intenta nuevamente. Se aumentaron los tiempos de espera, pero algunas páginas requieren más tiempo.'
+        }
+      };
+    }
 
     // Errores específicos del scraper
     if (errorMessage.includes('UNSUPPORTED_PROTOCOL')) {
@@ -236,6 +278,18 @@ export class ExtractionService {
           message: 'No se ha configurado la clave de API de Gemini',
           solution: 'Asegúrate de configurar la variable de entorno GEMINI_API_KEY'
         },
+      };
+    }
+
+    if (/reported as leaked/i.test(errorMessage)) {
+      return {
+        status: 500,
+        body: {
+          ok: false,
+          error: 'GEMINI_API_KEY_LEAKED',
+          message: 'La clave de la API de Gemini fue marcada como expuesta',
+          solution: 'Rotar la clave en Google AI Studio y actualizar GEMINI_API_KEY en el servidor.'
+        }
       };
     }
 
