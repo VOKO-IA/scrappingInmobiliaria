@@ -174,12 +174,8 @@ export class WebScraperService {
     };
 
     if (shouldUsePuppeteer) {
-      // Ruta con Puppeteer para evadir anti-bots sin proxies
-      let html = await this.fetchWithPuppeteer(url, { allowHeavy: false });
-      // Si el HTML luce muy pequeño o vacío, reintentar permitiendo recursos pesados y espera extra
-      if (!html || html.length < 3000) {
-        html = await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 3000 });
-      }
+      // Para portales inmobiliarios es más estable permitir recursos pesados y esperar un poco más
+      const html = await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 5000 });
       return { data: html, status: 200, statusText: 'OK' };
     }
 
@@ -275,8 +271,8 @@ export class WebScraperService {
     const page = await browser.newPage();
     // Aumentar timeouts por defecto
     try {
-      page.setDefaultTimeout(60000); // 60s para waitFor*
-      page.setDefaultNavigationTimeout(150000); // 150s navegación
+      page.setDefaultTimeout(120000); // 120s para waitFor*
+      page.setDefaultNavigationTimeout(210000); // 210s navegación
     } catch {}
 
     // UA y headers realistas
@@ -307,13 +303,15 @@ export class WebScraperService {
     const allowHeavy = !!opts?.allowHeavy;
     const extraWaitMs = opts?.extraWaitMs ?? 0;
     const { browser, page } = await this.launchPuppeteer(allowHeavy);
-    try {
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+    const run = async (): Promise<string> => {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
+      // Esperar calma de red después del DOM cargado
+      try { await page.waitForNetworkIdle({ idleTime: 800, timeout: 20000 }); } catch {}
 
       // Intentar aceptar cookies comunes
       try {
         await new Promise(r => setTimeout(r, 600));
-        await page.evaluate(() => {
+        await this.safeEvaluate(page, () => {
           const byId = document.getElementById('onetrust-accept-btn-handler');
           if (byId) (byId as HTMLButtonElement).click();
           const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
@@ -329,7 +327,7 @@ export class WebScraperService {
 
       // Esperar elementos comunes de listados (si existen)
       try {
-        await page.waitForSelector('a, h1, .listing, [role="main"], [itemtype*="schema.org/Offer"], [itemtype*="schema.org/Product"]', { timeout: 5000 });
+        await page.waitForSelector('a, h1, .listing, [role="main"], [itemtype*="schema.org/Offer"], [itemtype*="schema.org/Product"]', { timeout: 7000 });
       } catch {}
 
       // Evitar capturar intersticiales tipo "Un momento…" (común en Inmuebles24)
@@ -340,6 +338,21 @@ export class WebScraperService {
       }
 
       return await page.content();
+    };
+
+    try {
+      return await run();
+    } catch (err: any) {
+      // Reintento único si el contexto fue destruido por navegación
+      if (err && /Execution context was destroyed/i.test(String(err.message || err))) {
+        try {
+          await new Promise(r => setTimeout(r, 600));
+          return await run();
+        } catch (e) {
+          throw e;
+        }
+      }
+      throw err;
     } finally {
       await browser.close();
     }
@@ -348,11 +361,13 @@ export class WebScraperService {
   private async scrollPage(page: any, durationMs = 2000) {
     const start = Date.now();
     while (Date.now() - start < durationMs) {
-      await page.evaluate((delta: number) => window.scrollBy(0, delta), 100 + Math.floor(Math.random() * 200));
+      try {
+        await this.safeEvaluate(page, (delta: number) => window.scrollBy(0, delta), 100 + Math.floor(Math.random() * 200));
+      } catch {}
       await this.humanPause(120, 320);
     }
     // subir un poco
-    await page.evaluate(() => window.scrollBy(0, -200));
+    try { await this.safeEvaluate(page, () => window.scrollBy(0, -200)); } catch {}
   }
 
   private async mouseWiggle(page: any) {
@@ -372,14 +387,35 @@ export class WebScraperService {
     await new Promise(r => setTimeout(r, ms));
   }
 
+  // Evalúa en la página con reintentos ante 'Execution context was destroyed'
+  private async safeEvaluate(page: any, fn: any, ...args: any[]) {
+    const max = 3;
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        return await page.evaluate(fn, ...args);
+      } catch (err: any) {
+        const msg = String(err?.message || err);
+        const transient = /Execution context was destroyed|Cannot find context|Target closed/i.test(msg);
+        if (transient && attempt < max) {
+          attempt++;
+          await new Promise(r => setTimeout(r, 250));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   // Espera hasta que haya contenido real (evita pantallas intermedias tipo "Un momento…")
   private async waitForRealContent(page: any, hostname: string) {
     const isI24 = /inmuebles24\.com/i.test(hostname);
-    const deadline = Date.now() + 15000; // hasta 15s
+    const deadline = Date.now() + 25000; // hasta 25s
     let reloaded = false;
 
     while (Date.now() < deadline) {
-      const state = await page.evaluate(() => ({
+      const state = await this.safeEvaluate(page, () => ({
         title: document.title || '',
         bodyLen: (document.querySelector('body')?.innerText || '').trim().length,
       }));
@@ -398,7 +434,7 @@ export class WebScraperService {
       }
 
       await this.humanPause(400, 900);
-      await this.scrollPage(page, 600);
+      try { await this.scrollPage(page, 600); } catch {}
     }
   }
 

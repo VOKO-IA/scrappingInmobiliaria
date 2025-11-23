@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { ExtractionService } from '../services/extraction';
+import { WebScraperService } from '../services/web-scraper';
+import { UrlQuerySchema } from '../schemas/validation';
 import { HistoryService } from '../services/history';
 import PDFDocument from 'pdfkit';
 import fs from 'fs/promises';
@@ -8,6 +10,7 @@ import { env } from '../config/env';
 import axios from 'axios';
 
 const extractionService = new ExtractionService();
+const webScraper = new WebScraperService(true);
 
 export const scrape = Router();
 
@@ -34,6 +37,25 @@ scrape.get('/extract', async (req, res) => {
       error: 'INTERNAL_ERROR',
       message: 'An unexpected error occurred during extraction'
     });
+  }
+});
+
+// Endpoint para obtener el HTML crudo (sin parsear) de una URL
+scrape.get('/raw', async (req, res) => {
+  try {
+    const validation = UrlQuerySchema.safeParse({ url: (req.query || {}).url });
+    if (!validation.success) {
+      return res.status(400).json({ ok: false, error: 'INVALID_URL', message: 'URL de entrada no válida', details: validation.error.flatten() });
+    }
+
+    const { url } = validation.data;
+    const html = await webScraper.fetchRawHtml(url);
+    // Responder como text/html para inspección directa
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send(html);
+  } catch (error) {
+    console.error('Raw HTML error:', error);
+    return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'Failed to fetch raw HTML', details: error instanceof Error ? error.message : String(error) });
   }
 });
 
