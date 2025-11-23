@@ -14,7 +14,7 @@ export class ExtractionService {
   private webScraper: WebScraperService;
   private geminiService: GeminiService;
   // Timeout máximo por solicitud (ms)
-  private readonly REQUEST_TIMEOUT_MS = 90_000;
+  private readonly REQUEST_TIMEOUT_MS = 180_000;
 
   constructor() {
     this.webScraper = new WebScraperService();
