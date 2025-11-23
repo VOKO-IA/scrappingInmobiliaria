@@ -10,7 +10,7 @@ import { env } from '../config/env';
 import axios from 'axios';
 
 const extractionService = new ExtractionService();
-const webScraper = new WebScraperService(true);
+const webScraper = new WebScraperService(false);
 
 export const scrape = Router();
 
@@ -40,6 +40,42 @@ scrape.get('/extract', async (req, res) => {
   }
 });
 
+// Endpoint para extracción completa de etiquetas y texto (JSON, sin visual)
+scrape.get('/extract-all', async (req, res) => {
+  try {
+    const validation = UrlQuerySchema.safeParse({ url: (req.query || {}).url });
+    if (!validation.success) {
+      return res.status(400).json({ ok: false, error: 'INVALID_URL', message: 'URL de entrada no válida', details: validation.error.flatten() });
+    }
+    const { url } = validation.data;
+    const fastRaw = (req.query?.fast as string) || undefined;
+    const fast = fastRaw == null ? true : !/^(0|false|no)$/i.test(fastRaw);
+    const data = await webScraper.extractAll(url, { fast });
+    return res.status(200).json({ ok: true, url, data });
+  } catch (error) {
+    console.error('Extract-all error:', error);
+    return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'Failed to extract all', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+// Endpoint para extraer etiquetas básicas (sin HTML completo)
+scrape.get('/tags', async (req, res) => {
+  try {
+    const validation = UrlQuerySchema.safeParse({ url: (req.query || {}).url });
+    if (!validation.success) {
+      return res.status(400).json({ ok: false, error: 'INVALID_URL', message: 'URL de entrada no válida', details: validation.error.flatten() });
+    }
+    const { url } = validation.data;
+    const fastRaw = (req.query?.fast as string) || undefined;
+    const fast = fastRaw == null ? true : !/^(0|false|no)$/i.test(fastRaw);
+    const result = await webScraper.extractBasicTags(url, { fast });
+    return res.status(200).json({ ok: true, url, tags: result });
+  } catch (error) {
+    console.error('Basic tags error:', error);
+    return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'Failed to extract basic tags', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 // Endpoint para obtener el HTML crudo (sin parsear) de una URL
 scrape.get('/raw', async (req, res) => {
   try {
@@ -49,7 +85,13 @@ scrape.get('/raw', async (req, res) => {
     }
 
     const { url } = validation.data;
-    const html = await webScraper.fetchRawHtml(url);
+    const fastRaw = (req.query?.fast as string) || undefined;
+    // Default fast=true unless explicitly disabled with 0/false/no
+    const fast = fastRaw == null ? true : !/^(0|false|no)$/i.test(fastRaw);
+    const html = await webScraper.fetchRawHtml(
+      url,
+      fast ? { fast: true, forceAxios: true, timeoutMs: 8000 } : undefined
+    );
     // Responder como text/html para inspección directa
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(html);

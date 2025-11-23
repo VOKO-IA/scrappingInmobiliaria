@@ -151,10 +151,13 @@ export class WebScraperService {
   /**
    * Devuelve el HTML crudo (sin parsear) usando la misma lógica anti-bot.
    */
-  public async fetchRawHtml(url: string): Promise<string> {
+  public async fetchRawHtml(url: string, opts?: { fast?: boolean; forceAxios?: boolean; timeoutMs?: number }): Promise<string> {
     const urlObj = new URL(url);
     const realEstateHosts = ['inmuebles24.com', 'vivanuncios.com', 'vivanuncios.com.mx', 'lamudi.com', 'lamudi.com.mx', 'mercadolibre.com', 'mercadolibre.com.mx'];
-    const shouldUsePuppeteer = this.usePuppeteer || realEstateHosts.some(h => urlObj.hostname.includes(h));
+    const fast = !!opts?.fast;
+    const forceAxios = !!opts?.forceAxios;
+    const timeoutMs = opts?.timeoutMs ?? (fast ? 15000 : 120000);
+    const shouldUsePuppeteer = (!fast && !forceAxios) && (this.usePuppeteer || realEstateHosts.some(h => urlObj.hostname.includes(h)));
 
     if (shouldUsePuppeteer) {
       return await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 5000 });
@@ -162,7 +165,7 @@ export class WebScraperService {
 
     const baseUA = WebScraperService.USER_AGENTS[Math.floor(Math.random() * WebScraperService.USER_AGENTS.length)];
     const resp = await axios.get<string>(url, {
-      timeout: 120000,
+      timeout: timeoutMs,
       maxRedirects: 5,
       maxContentLength: env.scrapeMaxBytes,
       maxBodyLength: env.scrapeMaxBytes,
@@ -179,15 +182,154 @@ export class WebScraperService {
     if (resp.status >= 200 && resp.status < 400) {
       // Si huele a antibot aunque sea 200, podemos caer a Puppeteer
       const body = resp.data || '';
-      if (/access denied|distil|captcha/i.test(body)) {
+      if (!fast && /access denied|distil|captcha/i.test(body)) {
         return await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 5000 });
       }
       return body;
     }
-    if (resp.status === 403 || resp.status === 429) {
+    if (!fast && (resp.status === 403 || resp.status === 429)) {
       return await this.fetchWithPuppeteer(url, { allowHeavy: true, extraWaitMs: 5000 });
     }
     throw new Error(`HTTP_ERROR: STATUS_${resp.status}`);
+  }
+
+  /**
+   * Extrae etiquetas básicas (sin LLM): títulos, encabezados, párrafos, imágenes y enlaces.
+   */
+  public async extractBasicTags(url: string, opts?: { fast?: boolean }): Promise<any> {
+    const html = await this.fetchRawHtml(url, { fast: opts?.fast ?? true, forceAxios: opts?.fast ?? true });
+    const $ = load(html);
+    const base = url;
+
+    const getAbs = (maybeUrl?: string) => {
+      if (!maybeUrl) return undefined;
+      try { return new URL(maybeUrl, base).toString(); } catch { return undefined; }
+    };
+
+    const title = $('title').first().text().trim();
+    const h1 = $('h1').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+    const h2 = $('h2').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+    const h3 = $('h3').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+    const p = $('p').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+
+    const images = $('img').map((_, el) => {
+      const $el = $(el);
+      const src = ($el.attr('src') || '').trim();
+      const alt = ($el.attr('alt') || '').trim() || undefined;
+      return { src, absSrc: getAbs(src), alt };
+    }).get();
+
+    const links = $('a[href]').map((_, el) => {
+      const $el = $(el);
+      const href = ($el.attr('href') || '').trim();
+      const text = $el.text().replace(/\s+/g, ' ').trim();
+      return { href, absHref: getAbs(href), text };
+    }).get();
+
+    const meta = $('meta').map((_, el) => {
+      const $el = $(el);
+      const name = ($el.attr('name') || $el.attr('property') || '').trim();
+      const content = ($el.attr('content') || '').trim();
+      if (!name || !content) return undefined as any;
+      return { name, content };
+    }).get().filter(Boolean);
+
+    return { url, title, h1, h2, h3, p, images, links, meta };
+  }
+
+  public async extractAll(url: string, opts?: { fast?: boolean }): Promise<any> {
+    const html = await this.fetchRawHtml(url, { fast: opts?.fast ?? true, forceAxios: opts?.fast ?? true, timeoutMs: (opts?.fast ?? true) ? 15000 : 120000 });
+    const $ = load(html);
+    const base = url;
+
+    const abs = (u?: string) => {
+      if (!u) return undefined;
+      try { return new URL(u, base).toString(); } catch { return undefined; }
+    };
+
+    const title = $('title').first().text().trim();
+
+    const headings = {
+      h1: $('h1').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get(),
+      h2: $('h2').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get(),
+      h3: $('h3').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get(),
+      h4: $('h4').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get(),
+      h5: $('h5').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get(),
+      h6: $('h6').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get(),
+    };
+
+    const paragraphs = $('p').map((_, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+
+    const lists = {
+      ul: $('ul').map((_, ul) => $(ul).find('li').map((__, li) => $(li).text().replace(/\s+/g, ' ').trim()).get()).get(),
+      ol: $('ol').map((_, ol) => $(ol).find('li').map((__, li) => $(li).text().replace(/\s+/g, ' ').trim()).get()).get(),
+    };
+
+    const tables = $('table').map((_, tbl) => {
+      const $tbl = $(tbl);
+      const headers = $tbl.find('thead th').map((__, th) => $(th).text().replace(/\s+/g, ' ').trim()).get();
+      const rows = $tbl.find('tbody tr').map((__, tr) => $(tr).find('td,th').map((___, td) => $(td).text().replace(/\s+/g, ' ').trim()).get()).get();
+      return { headers, rows };
+    }).get();
+
+    const images = $('img').map((_, el) => {
+      const $el = $(el);
+      const src = ($el.attr('src') || '').trim();
+      const alt = ($el.attr('alt') || '').trim() || undefined;
+      const width = Number($el.attr('width')) || undefined;
+      const height = Number($el.attr('height')) || undefined;
+      return { src, absSrc: abs(src), alt, width, height };
+    }).get();
+
+    const links = $('a[href]').map((_, el) => {
+      const $el = $(el);
+      const href = ($el.attr('href') || '').trim();
+      const text = $el.text().replace(/\s+/g, ' ').trim();
+      const rel = ($el.attr('rel') || '').trim() || undefined;
+      const target = ($el.attr('target') || '').trim() || undefined;
+      return { href, absHref: abs(href), text, rel, target };
+    }).get();
+
+    const meta = $('meta').map((_, el) => {
+      const $el = $(el);
+      const name = ($el.attr('name') || $el.attr('property') || '').trim();
+      const content = ($el.attr('content') || '').trim();
+      if (!name || !content) return undefined as any;
+      return { name, content };
+    }).get().filter(Boolean);
+
+    // JSON-LD y Next.js __NEXT_DATA__ para enriquecer el parser del lado del cliente
+    const jsonLd = $('script[type="application/ld+json"]').map((_, el) => {
+      const node: any = el as any;
+      const raw = (node && node.children && node.children[0] && node.children[0].data) || '';
+      return String(raw).trim();
+    }).get().filter(Boolean);
+
+    const nextData = $('#__NEXT_DATA__').map((_, el) => {
+      const node: any = el as any;
+      const raw = (node && node.children && node.children[0] && node.children[0].data) || '';
+      return String(raw).trim();
+    }).get().filter(Boolean);
+
+    const fullText = $('body').text().replace(/\s+/g, ' ').trim();
+    const wordCount = fullText ? fullText.split(/\s+/).length : 0;
+
+    return {
+      url,
+      title,
+      headings,
+      paragraphs,
+      lists,
+      tables,
+      images,
+      links,
+      meta,
+      jsonLd,
+      nextData,
+      text: fullText,
+      charCount: fullText.length,
+      wordCount,
+    };
   }
 
   /**
